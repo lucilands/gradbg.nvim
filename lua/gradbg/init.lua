@@ -4,7 +4,7 @@ local uv = vim.loop
 
 
 local next_id = 0
-local breakpoints = {}
+M.breakpoints = {}
 
 function send_gdbmi(msg)
 	next_id = next_id + 1
@@ -42,6 +42,16 @@ local function get_buffer_by_name(name)
     return nil
 end
 
+function update_signs(bufnr)
+	vim.fn.sign_unplace('GraDBGBreakpoint', {buffer = '%'})
+	for _, file in ipairs(M.breakpoints) do
+		for _, bkpt in ipairs(file) do
+			print("Setting breakpoint in line "..bktp.line)
+			vim.fn.sign_place(0, "gradbg", "GraDBGBreakpoint", bufnr, { lnum = bkpt.line, priority = 20 })
+		end
+	end
+end
+
 function _G.GraDBG_sign_click(minwid, clicks, button, mods)
     if button == "l" then
 		local pos = vim.fn.getmousepos()
@@ -61,17 +71,17 @@ function M.toggle_breakpoint(line)
 	local bufnr = vim.api.nvim_get_current_buf()
 	local existing = vim.fn.sign_getplaced(bufnr, { group = "gradbg", lnum = line })[1].signs
 	if #existing > 0 then
-		vim.fn.sign_unplace("gradbg", { buffer = bufnr, id = existing[1].id })
-		send_gdbmi("-break-delete " .. breakpoints[line])
+		send_gdbmi("-break-delete " .. M.breakpoints[vim.api.nvim_buf_get_name(bufnr)].id)
 	else
 		local res = send_gdbmi("-break-insert " .. vim.fn.bufname() .. ":" .. line)
 		if res.class == "done" then
-			vim.fn.sign_place(0, "gradbg", "GraDBGBreakpoint", bufnr, { lnum = line, priority = 20 })
-			breakpoints[line] = res.results.bkpt.number
+			if not M.breakpoints[res.results.bkpt.file] then M.breakpoints[res.results.bkpt.file] = {} end
+			table.insert(M.breakpoints[res.results.bkpt.file], {line = line, id = res.results.bkpt.number})
 		else
 			vim.notify("Failed to add breakpoint: " .. res.results.msg, "ERROR")
 		end
 	end
+	update_signs(bufnr)
 end
 
 function M.init_dbg(bin)
@@ -81,10 +91,11 @@ end
 
 function M.reset()
 	send_gdbmi("-file-exec-and-symbols")
+	breakpoints = {}
 	M.curbin = nil
 end
 
-function M.start()
+function M.start(args)
 	--local buf_handle = vim.api.nvim_create_buf(false, true)
 	--vim.api.nvim_buf_set_option(buf_handle, "modifiable", false)
 
@@ -111,7 +122,12 @@ function M.start()
 
 	local ns = vim.api.nvim_create_namespace("gradbg_debug_highlights")
 
+	if args then
+		send_gdbmi("-exec-arguments " .. table.concat(args, " "))
+	end
+
 	send_gdbmi("-exec-run")
+
 	timer:start(100, 100, function()
 		vim.schedule(function()
 			M.gdb_proc.stdout:read_start(function(err, data)
@@ -153,6 +169,12 @@ function M.start()
 	--})
 end
 
+function M.stop()
+	local ns = vim.api.nvim_create_namespace("gradbg_debug_highlights")
+	send_gdbmi("-exec-abort")
+	vim.api.nvim_buf_clear_namespace(0, ns, 0, -1)
+end
+
 function M.setup(opts)
 	opts = opts or {}
 
@@ -177,7 +199,7 @@ function M.setup(opts)
 
 	vim.api.nvim_create_user_command("GraDBG", function(opts)
 		M.init_dbg(opts.fargs[1])
-	end, {desc = "Start a debugging process", nargs = 1})
+	end, {desc = "Start a debugging process", nargs = 1, complete = "file"})
 
 	vim.api.nvim_create_user_command("GraDBGbreak", function(opts)
 		M.toggle_breakpoint(opts.fargs[1])
@@ -188,8 +210,13 @@ function M.setup(opts)
 	end, {desc = "Reset the debugging process"})
 
 	vim.api.nvim_create_user_command("GraDBGstart", function(opts)
-		M.start()
-	end, {desc = "Start debugging"})
+		M.start(opts.fargs)
+	end, {desc = "Start debugging", nargs = "*"})
+
+	vim.api.nvim_create_user_command("GraDBGstop", function(opts)
+		M.stop()
+	end, {desc = "Stop the debugging process"})
+
 end
 
 return M
